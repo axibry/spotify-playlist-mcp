@@ -18,7 +18,7 @@ function makeId(seed) {
   return s;
 }
 
-function track(seed, name, artist, album, albumType, date, ms) {
+function track(seed, name, artist, album, albumType, date, ms, isrc = `TEST${seed}`) {
   const id = makeId(seed);
   return {
     id,
@@ -27,9 +27,9 @@ function track(seed, name, artist, album, albumType, date, ms) {
     uri: `spotify:track:${id}`,
     duration_ms: ms,
     explicit: false,
-    artists: [{ name: artist }],
+    artists: (Array.isArray(artist) ? artist : [artist]).map((name) => ({ name })),
     album: { name: album, album_type: albumType, release_date: date, images: [{ url: "https://i.example/x.jpg" }] },
-    external_ids: { isrc: `TEST${seed}` },
+    external_ids: { isrc },
     external_urls: { spotify: `https://open.spotify.com/track/${id}` },
   };
 }
@@ -42,7 +42,48 @@ export const CATALOG = [
   track(5, "Paranoid Android", "Radiohead", "OK Computer", "album", "1997-05-21", 387213),
   track(6, "Karma Police", "Radiohead", "OK Computer", "album", "1997-05-21", 264066),
   track(7, "Strobe", "deadmau5", "For Lack of a Better Name", "album", "2009-10-06", 637000),
+  // Re-releases of the same recording as #0 (same ISRC).
+  track(8, "Bohemian Rhapsody", "Queen", "Greatest Hits", "compilation", "1981-10-26", 355000, "TEST1"),
+  track(9, "Bohemian Rhapsody", "Queen", "Bohemian Rhapsody (The Original Soundtrack)", "album", "2018-10-19", 355000, "TEST1"),
+  track(10, "Prelude in C-sharp minor, Op. 3 No. 2", ["Sergei Rachmaninoff", "Vladimir Ashkenazy"], "Morceaux de fantaisie", "album", "1993-01-01", 230000),
+  track(11, "Rachmaninoff Prelude Remix", "MC Junk", "Junk Tape", "single", "2024-02-02", 150000),
+  track(12, 'Symphony No. 9 "From the New World": IV. Allegro con fuoco', ["Antonín Dvořák", "Berliner Philharmoniker"], "Dvořák: Symphony No. 9", "album", "1990-05-01", 660000),
 ];
+
+// Albums, built from the catalog, with disc and track numbers filled in on each track.
+const ALBUMS = new Map();
+for (const t of CATALOG) {
+  let a = [...ALBUMS.values()].find((x) => x.name === t.album.name);
+  if (!a) {
+    a = { id: makeId(2000 + ALBUMS.size), name: t.album.name, album_type: t.album.album_type, release_date: t.album.release_date, artists: t.artists, tracks: [] };
+    ALBUMS.set(a.id, a);
+  }
+  t.album.id = a.id;
+  t.disc_number = 1;
+  t.track_number = a.tracks.length + 1;
+  a.tracks.push(t);
+}
+// A 120-track box set on two discs, reachable only through the albums endpoints.
+export const BOX_ALBUM_ID = makeId(3000);
+ALBUMS.set(BOX_ALBUM_ID, {
+  id: BOX_ALBUM_ID,
+  name: "Complete Works",
+  album_type: "compilation",
+  release_date: "2001-01-01",
+  artists: [{ name: "Various Artists" }],
+  tracks: Array.from({ length: 120 }, (_, i) => ({
+    id: makeId(3001 + i),
+    name: `Work ${i + 1}`,
+    artists: [{ name: "Various Artists" }],
+    duration_ms: 60000,
+    disc_number: i < 60 ? 1 : 2,
+    track_number: (i % 60) + 1,
+    external_urls: { spotify: `https://open.spotify.com/track/${makeId(3001 + i)}` },
+  })),
+});
+
+const MOCK_BASE = (port) => `http://127.0.0.1:${port}`;
+const fold = (s) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 
 export const UNKNOWN_ID = makeId(777);
 export const RELINKED_ID = makeId(500);
@@ -87,6 +128,10 @@ export function startMock(port) {
     }
     if (url.pathname === "/__ratelimit") {
       state.rateLimitNext = Number(url.searchParams.get("n") ?? "1");
+      return send(200, { ok: true });
+    }
+    if (url.pathname === "/__failcreate") {
+      state.failCreate = true;
       return send(200, { ok: true });
     }
     if (url.pathname === "/__rejectfields") {
@@ -155,7 +200,7 @@ export function startMock(port) {
       const limit = Number(url.searchParams.get("limit") ?? "5");
       if (limit > 10) return send(400, { error: { message: "Invalid limit" } });
       if (url.searchParams.get("type") !== "track") return send(400, { error: { message: "bad type" } });
-      const q = url.searchParams.get("q") ?? "";
+      const q = fold(url.searchParams.get("q") ?? "");
       const filters = {};
       const free = q
         .replace(/(track|artist|album|year):"([^"]*)"|(track|artist|album|year):(\S+)/g, (_, k1, v1, k2, v2) => {
@@ -166,11 +211,12 @@ export function startMock(port) {
         .split(/\s+/)
         .filter(Boolean);
       const items = CATALOG.filter((t) => {
-        if (filters.track && !t.name.toLowerCase().includes(filters.track)) return false;
-        if (filters.artist && !t.artists[0].name.toLowerCase().includes(filters.artist)) return false;
-        if (filters.album && !t.album.name.toLowerCase().includes(filters.album)) return false;
+        const artists = fold(t.artists.map((a) => a.name).join(" "));
+        if (filters.track && !fold(t.name).includes(filters.track)) return false;
+        if (filters.artist && !artists.includes(filters.artist)) return false;
+        if (filters.album && !fold(t.album.name).includes(filters.album)) return false;
         if (filters.year && !t.album.release_date.startsWith(filters.year)) return false;
-        const hay = `${t.name} ${t.artists[0].name} ${t.album.name}`.toLowerCase();
+        const hay = fold(`${t.name} ${artists} ${t.album.name}`);
         return free.every((w) => hay.includes(w));
       });
       return send(200, { tracks: { items: items.slice(0, limit), total: items.length } });
@@ -184,7 +230,42 @@ export function startMock(port) {
       return t ? send(200, t) : send(404, { error: { message: "Non existing id" } });
     }
 
+    m = /^\/albums\/([0-9A-Za-z]{22})(\/tracks)?$/.exec(path);
+    if (m && req.method === "GET") {
+      const a = ALBUMS.get(m[1]);
+      if (!a) return send(404, { error: { message: "Non existing id" } });
+      if (!m[2]) {
+        return send(200, {
+          id: a.id,
+          name: a.name,
+          album_type: a.album_type,
+          release_date: a.release_date,
+          artists: a.artists,
+          total_tracks: a.tracks.length,
+          external_urls: { spotify: `https://open.spotify.com/album/${a.id}` },
+        });
+      }
+      const limit = Number(url.searchParams.get("limit") ?? "20");
+      if (limit > 50) return send(400, { error: { message: "Invalid limit" } });
+      const offset = Number(url.searchParams.get("offset") ?? "0");
+      const items = a.tracks.slice(offset, offset + limit).map((t) => ({
+        id: t.id,
+        name: t.name,
+        artists: t.artists,
+        duration_ms: t.duration_ms,
+        disc_number: t.disc_number,
+        track_number: t.track_number,
+        external_urls: t.external_urls,
+      }));
+      const next = offset + limit < a.tracks.length ? `${MOCK_BASE(port)}/v1/albums/${a.id}/tracks?offset=${offset + limit}&limit=${limit}` : null;
+      return send(200, { items, next, total: a.tracks.length, limit, offset });
+    }
+
     if (path === "/me/playlists" && req.method === "POST") {
+      if (state.failCreate) {
+        state.failCreate = false;
+        return send(503, { error: { status: 503, message: "Service unavailable" } });
+      }
       const data = JSON.parse(body);
       if (data.public !== false) return send(400, { error: { message: "test expects private" } });
       const id = makeId(100 + state.playlists.size);

@@ -42,8 +42,11 @@ export interface TrackSummary {
   name: string;
   artists: string[];
   album: string;
+  album_id?: string;
   album_type?: string;
   release_date?: string;
+  disc_number?: number;
+  track_number?: number;
   duration: string;
   explicit: boolean;
   isrc?: string;
@@ -60,7 +63,7 @@ export interface PlaylistTrack {
 
 const BASE62_ID = /^[0-9A-Za-z]{22}$/;
 
-function parseSpotifyId(input: string, kind: "track" | "playlist"): string {
+function parseSpotifyId(input: string, kind: "track" | "playlist" | "album"): string {
   const s = input.trim();
   if (BASE62_ID.test(s)) return s;
   const uri = new RegExp(`^spotify:${kind}:([0-9A-Za-z]{22})$`).exec(s);
@@ -82,6 +85,30 @@ function parseSpotifyId(input: string, kind: "track" | "playlist"): string {
 export const parseTrackId = (input: string) => parseSpotifyId(input, "track");
 /** Accepts a bare ID, a spotify:playlist: URI, or an open.spotify.com playlist link. */
 export const parsePlaylistId = (input: string) => parseSpotifyId(input, "playlist");
+/** Accepts a bare ID, a spotify:album: URI, or an open.spotify.com album link. */
+export const parseAlbumId = (input: string) => parseSpotifyId(input, "album");
+
+export interface AlbumTrack {
+  disc_number: number;
+  track_number: number;
+  id: string;
+  name: string;
+  artists: string[];
+  duration: string;
+  link: string;
+}
+
+export interface AlbumListing {
+  album_id: string;
+  name: string;
+  artists: string[];
+  album_type?: string;
+  release_date?: string;
+  total_tracks: number;
+  link: string;
+  offset: number;
+  tracks: AlbumTrack[];
+}
 
 function formatDuration(ms: number | undefined): string {
   if (typeof ms !== "number") return "?";
@@ -96,8 +123,11 @@ export function summarizeTrack(t: any): TrackSummary {
     name: t.name,
     artists: (t.artists ?? []).map((a: { name: string }) => a.name),
     album: t.album?.name ?? "",
+    album_id: t.album?.id,
     album_type: t.album?.album_type,
     release_date: t.album?.release_date,
+    disc_number: t.disc_number,
+    track_number: t.track_number,
     duration: formatDuration(t.duration_ms),
     explicit: Boolean(t.explicit),
     isrc: t.external_ids?.isrc,
@@ -337,6 +367,45 @@ export class Spotify {
       };
     }
     return t;
+  }
+
+  /** An album's details and its tracks in order (`count` tracks from `start`, 50 per request). */
+  async getAlbum(id: string, start: number, count: number): Promise<AlbumListing> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const a = (await this.request("GET", `/albums/${id}`)) as any;
+    const tracks: AlbumTrack[] = [];
+    let offset = start;
+    while (tracks.length < count) {
+      const limit = Math.min(50, count - tracks.length);
+      const page = (await this.request("GET", `/albums/${id}/tracks`, {
+        query: { limit: String(limit), offset: String(offset) },
+      })) as { items?: any[]; next?: string | null }; // eslint-disable-line @typescript-eslint/no-explicit-any
+      const items = (page.items ?? []).filter(Boolean);
+      for (const t of items) {
+        tracks.push({
+          disc_number: t.disc_number,
+          track_number: t.track_number,
+          id: t.id,
+          name: t.name,
+          artists: (t.artists ?? []).map((x: { name: string }) => x.name),
+          duration: formatDuration(t.duration_ms),
+          link: t.external_urls?.spotify ?? `https://open.spotify.com/track/${t.id}`,
+        });
+      }
+      offset += items.length;
+      if (!page.next || items.length === 0) break;
+    }
+    return {
+      album_id: id,
+      name: a.name,
+      artists: (a.artists ?? []).map((x: { name: string }) => x.name),
+      album_type: a.album_type,
+      release_date: a.release_date,
+      total_tracks: a.total_tracks ?? tracks.length,
+      link: a.external_urls?.spotify ?? `https://open.spotify.com/album/${id}`,
+      offset: start,
+      tracks,
+    };
   }
 
   async createPlaylist(name: string, description: string | undefined): Promise<{ id: string; link: string }> {

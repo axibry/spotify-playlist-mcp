@@ -13,7 +13,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CATALOG, CLIENT_ID, CLIENT_SECRET, RELINKED_ID, UNKNOWN_ID, startMock } from "./mock-spotify.mjs";
+import { BOX_ALBUM_ID, CATALOG, CLIENT_ID, CLIENT_SECRET, RELINKED_ID, UNKNOWN_ID, startMock } from "./mock-spotify.mjs";
 
 const MOCK_PORT = 8790;
 const WORKER_PORT = 8787;
@@ -255,7 +255,7 @@ try {
     oauthToken = tokens.access_token;
     const client = await connect(oauthToken);
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 6);
+    assert.equal(tools.length, 7);
     await client.close();
   });
 
@@ -318,11 +318,12 @@ try {
 
   const client = await connect(oauthToken);
 
-  await test("lists exactly the six intended tools, with workflow instructions", async () => {
+  await test("lists exactly the seven intended tools, with workflow instructions", async () => {
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), [
       "add_tracks_to_playlist",
       "create_playlist",
+      "get_album",
       "get_playlist",
       "get_track",
       "list_created_playlists",
@@ -372,6 +373,69 @@ try {
     );
     assert.equal(out.results[0].query_used, "Hey Jude Remastered Beatles");
     assert.equal(out.results[0].candidates[0].id, id(2));
+  });
+
+  await test("search groups re-releases of the same recording under the original release", async () => {
+    const out = data(
+      await client.callTool({ name: "search_tracks", arguments: { requests: [{ title: "Bohemian Rhapsody", artist: "Queen" }] } }),
+    );
+    const [original, live] = out.results[0].candidates;
+    assert.equal(original.id, id(0));
+    assert.equal(original.album, "A Night at the Opera");
+    // Other albums first, compilations last; each listed once.
+    assert.deepEqual(original.also_on.map((r) => r.id), [id(8), id(7)]);
+    assert.equal(live.id, id(1));
+    assert.equal(live.also_on, undefined);
+    assert.equal(original.track_number, 1);
+    assert.ok(original.album_id);
+  });
+
+  await test("search drops results that don't credit the requested artist", async () => {
+    const out = data(
+      await client.callTool({
+        name: "search_tracks",
+        arguments: { requests: [{ title: "Rachmaninoff Prelude", artist: "Rachmaninoff" }] },
+      }),
+    );
+    assert.deepEqual(out.results[0].candidates.map((c) => c.id), [id(9)]);
+    assert.equal(out.results[0].dropped_other_artists, 1);
+  });
+
+  await test("artist matching ignores accents and case", async () => {
+    const out = data(
+      await client.callTool({ name: "search_tracks", arguments: { requests: [{ title: "new world", artist: "dvorak" }] } }),
+    );
+    assert.equal(out.results[0].candidates[0].id, id(11));
+    assert.equal(out.results[0].dropped_other_artists, undefined);
+    assert.equal(out.results[0].note, undefined);
+  });
+
+  await test("if no result credits the artist, unfiltered results come back with a note", async () => {
+    const out = data(
+      await client.callTool({ name: "search_tracks", arguments: { requests: [{ query: "karma police", artist: "Radiohed" }] } }),
+    );
+    assert.equal(out.results[0].candidates[0].id, id(5));
+    assert.match(out.results[0].note, /No result credits "Radiohed"/);
+  });
+
+  await test("get_album lists an album's tracks in order", async () => {
+    const found = data(
+      await client.callTool({ name: "search_tracks", arguments: { requests: [{ title: "Paranoid Android", artist: "Radiohead" }] } }),
+    );
+    const albumId = found.results[0].candidates[0].album_id;
+    const out = data(await client.callTool({ name: "get_album", arguments: { album: `https://open.spotify.com/album/${albumId}` } }));
+    assert.equal(out.name, "OK Computer");
+    assert.equal(out.total_tracks, 2);
+    assert.deepEqual(out.tracks.map((t) => [t.track_number, t.name]), [[1, "Paranoid Android"], [2, "Karma Police"]]);
+  });
+
+  await test("get_album pages through large albums and honours offset and limit", async () => {
+    const all = data(await client.callTool({ name: "get_album", arguments: { album: BOX_ALBUM_ID } }));
+    assert.equal(all.total_tracks, 120);
+    assert.equal(all.tracks.length, 120);
+    assert.deepEqual([all.tracks[60].disc_number, all.tracks[60].track_number], [2, 1]);
+    const part = data(await client.callTool({ name: "get_album", arguments: { album: BOX_ALBUM_ID, offset: 100, limit: 10 } }));
+    assert.deepEqual(part.tracks.map((t) => t.name), Array.from({ length: 10 }, (_, i) => `Work ${101 + i}`));
   });
 
   await test("get_track accepts IDs, URIs and links, and reports bad items without losing the rest", async () => {
@@ -448,6 +512,7 @@ try {
       const r = await client.callTool({ name, arguments: args });
       assert.ok(r.isError, `${name} should refuse`);
       assert.match(text(r), /only reads or changes playlists it created/);
+      assert.match(text(r), /safe to retry/);
     }
     assert.deepEqual(state.playlists.get(foreign).items, [id(0)]);
   });
@@ -473,6 +538,37 @@ try {
       await client.callTool({ name: "add_tracks_to_playlist", arguments: { playlist: out.playlist_id, tracks: [id(0)] } }),
     );
     assert.equal(fix.verification.ok, true);
+  });
+
+  await test("create_playlist refuses a same-name playlist made minutes ago, unless told to", async () => {
+    const first = data(await client.callTool({ name: "create_playlist", arguments: { name: "Dup test", tracks: [id(0)] } }));
+    const before = state.playlists.size;
+    const again = await client.callTool({ name: "create_playlist", arguments: { name: " dup TEST", tracks: [id(0)] } });
+    assert.ok(again.isError);
+    const info = JSON.parse(text(again));
+    assert.equal(info.existing_playlist_id, first.playlist_id);
+    assert.match(info.error, /No new playlist was created/);
+    assert.equal(state.playlists.size, before);
+    const forced = data(
+      await client.callTool({ name: "create_playlist", arguments: { name: "Dup test", tracks: [id(0)], allow_duplicate: true } }),
+    );
+    assert.notEqual(forced.playlist_id, first.playlist_id);
+  });
+
+  await test("a failed create says no playlist was made and it's safe to retry", async () => {
+    await fetch(`${MOCK}/__failcreate`);
+    const before = state.playlists.size;
+    const r = await client.callTool({ name: "create_playlist", arguments: { name: "Fail test", tracks: [id(0)] } });
+    assert.ok(r.isError);
+    assert.match(text(r), /503/);
+    assert.match(text(r), /No playlist was created, so it's safe to retry/);
+    assert.equal(state.playlists.size, before);
+  });
+
+  await test("a failed add says nothing was added and it's safe to retry", async () => {
+    const r = await client.callTool({ name: "add_tracks_to_playlist", arguments: { playlist: playlistId, tracks: [UNKNOWN_ID] } });
+    assert.ok(r.isError);
+    assert.match(JSON.parse(text(r)).error, /Nothing was added .*safe to retry/);
   });
 
   await test("refreshes an expired access token once, even with parallel calls", async () => {

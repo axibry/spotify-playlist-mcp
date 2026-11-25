@@ -6,14 +6,17 @@ A small MCP server on Cloudflare Workers that lets Claude build **private Spotif
 
 | Tool | What it does |
 | --- | --- |
-| `search_tracks` | Look up to 10 tracks per call; returns candidates with title, artists, album, release date, duration and link |
+| `search_tracks` | Look up to 10 tracks per call; returns distinct recordings with title, artists, album, release date, track position, duration and link. Re-releases of the same recording are grouped under `also_on`; results that don't credit the requested artist are dropped |
 | `get_track` | Confirm up to 10 tracks from IDs or Spotify links |
-| `create_playlist` | Create a **private** playlist with exactly the given tracks (up to 500), then verify it |
+| `get_album` | List an album's tracks in order, to see how a work is split into movements or parts |
+| `create_playlist` | Create a **private** playlist with exactly the given tracks (up to 500), then verify it. Won't create a second playlist with the same name within 10 minutes unless asked, so a retried request can't duplicate it |
 | `add_tracks_to_playlist` | Add tracks to a playlist **this connector created**, then verify the inserted range |
 | `get_playlist` | Read back a playlist **this connector created** |
 | `list_created_playlists` | List the playlists this connector created |
 
-Deliberately missing: deleting playlists, removing tracks, touching your library, playback, and reading or changing any playlist the connector didn't create. The Spotify sign-in only requests `playlist-modify-private` and `playlist-read-private`.
+Deliberately missing: deleting playlists, removing tracks, touching your library, playback, and reading or changing any playlist the connector didn't create. (Spotify's API also no longer returns the tracks of other people's playlists, so copying a public playlist means pasting its track links.)
+
+Errors say whether anything was changed and whether a retry is safe. The Spotify sign-in only requests `playlist-modify-private` and `playlist-read-private`.
 
 ## How access works
 
