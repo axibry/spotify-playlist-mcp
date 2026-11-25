@@ -116,7 +116,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  const server = buildServer(env);
+  const server = buildServer(env, { callerIp: request.headers.get("CF-Connecting-IP") });
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -302,8 +302,16 @@ function providerFor(origin: string): OAuthProvider<Env> {
   return provider;
 }
 
+// TEMPORARY (Access troubleshooting): log where machine requests come from, so the
+// Bypass rule's IP ranges can be checked in Workers Logs. Remove once settled.
+const MACHINE_PATHS = ["/mcp", "/token", "/register"];
+
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return providerFor(new URL(request.url).origin).fetch(request, env, ctx);
+    const url = new URL(request.url);
+    if (MACHINE_PATHS.includes(url.pathname) || url.pathname.startsWith("/.well-known/")) {
+      console.log(JSON.stringify({ caller_ip: request.headers.get("CF-Connecting-IP"), path: url.pathname }));
+    }
+    return providerFor(url.origin).fetch(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;

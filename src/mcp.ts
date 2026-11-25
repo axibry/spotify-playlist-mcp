@@ -105,7 +105,7 @@ const trackRef = z
   .min(1)
   .describe("A Spotify track ID, a spotify:track: URI, or an open.spotify.com/track link");
 
-export function buildServer(env: Env): McpServer {
+export function buildServer(env: Env, debug: { callerIp?: string | null } = {}): McpServer {
   const spotify = new Spotify(env);
   const server = new McpServer(
     { name: "spotify-playlist-mcp", version: "1.1.0" },
@@ -307,7 +307,14 @@ export function buildServer(env: Env): McpServer {
           cursor = page.list_complete ? undefined : page.cursor;
         } while (cursor);
         out.sort((a, b) => b.created_at.localeCompare(a.created_at));
-        return { data: { note: "Names are as created; they may have been renamed in Spotify since.", playlists: out } };
+        return {
+          data: {
+            note: "Names are as created; they may have been renamed in Spotify since.",
+            // TEMPORARY (Access troubleshooting): the address this call arrived from.
+            caller_ip: debug.callerIp ?? null,
+            playlists: out,
+          },
+        };
       }),
   );
 
