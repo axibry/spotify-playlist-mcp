@@ -78,10 +78,13 @@ Authentication settings can't be edited after a connector is added. To change th
 
 ## Optional: Cloudflare Access
 
-For a second layer, put [Cloudflare Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) in front of the Worker, split by path:
+For a second layer, put [Cloudflare Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) in front of the Worker. Everyone must sign in to Cloudflare, except Claude's servers, which are let through by IP address:
 
-- `/`, `/login`, `/callback`, `/authorize` (pages you open yourself): require your email. Approving a Claude connection or re-linking Spotify then needs your key *and* your inbox.
-- `/mcp`, `/token`, `/register`, `/.well-known/*` (called by Claude's servers): a Bypass policy for [Anthropic's published IP ranges](https://platform.claude.com/docs/en/api/ip-addresses). Everyone else is denied. Update the ranges if Anthropic changes them.
+1. If you haven't used Zero Trust before, open **Zero Trust** in the Cloudflare dashboard, pick a team name and the Free plan.
+2. **Workers & Pages → spotify-playlist-mcp → Access → Protect this Worker behind Access**. Choose **All traffic** and the **Cloudflare account** policy, then **Apply Access**.
+3. **Zero Trust → Access controls → Applications**, open the application just created for the Worker, and add a policy: action **Bypass**, include **IP ranges** `160.79.104.0/21` and `153.61.208.0/20` ([Anthropic's published outbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)). Save.
+
+Signing in to Spotify or approving a Claude connection then needs your Cloudflare login *and* the connector key. If Anthropic announces new ranges, update the Bypass policy. To undo, turn Access off on the Worker's **Access** tab.
 
 ## Things to know
 
