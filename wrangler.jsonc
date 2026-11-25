@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "spotify-playlist-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "observability": { "enabled": true },
+
+  // Stores the Spotify refresh token, a cached access token, sign-in state,
+  // and the IDs of playlists this connector created. No ID is needed here:
+  // Wrangler creates the namespace on first deploy and keeps it linked.
+  "kv_namespaces": [{ "binding": "KV" }]
+
+  // Secrets (set in the Cloudflare dashboard, never in this repo):
+  //   SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, CONNECTOR_KEY
+}

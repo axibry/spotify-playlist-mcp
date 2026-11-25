@@ -1,0 +1,22 @@
+{
+  "name": "spotify-playlist-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small MCP server on Cloudflare Workers that builds private Spotify playlists from exact, verified tracks.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/run-tests.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261125.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.168.0"
+  }
+}
