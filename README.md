@@ -17,7 +17,7 @@ Deliberately missing: deleting playlists, removing tracks, touching your library
 
 ## How access works
 
-- **Your connector key** is a password you create. It's needed for the two one-time steps below: signing the Worker in to Spotify, and approving Claude's connection.
+- **Your connector key** is a password you create. It's only used on the Worker's own pages: signing the Worker in to Spotify, and approving a Claude connection. It is never accepted by the MCP endpoint itself, so a leaked key can't call the tools without also getting through the approval page.
 - **Claude** connects with OAuth: when you add the connector, Claude opens a consent page on your Worker, you enter the connector key, and Claude receives its own token. The key isn't stored in Claude. Tokens can only be sent to Claude's own callback (`claude.ai` / `claude.com`) or an app on your computer, so a look-alike app can't get one.
 - **Spotify** tokens stay inside your Cloudflare account (Workers KV). Neither Claude nor this repo ever sees them.
 
@@ -70,13 +70,18 @@ Then try: *"Make a playlist called Test with Bohemian Rhapsody by Queen and Stro
 
 Authentication settings can't be edited after a connector is added. To change them, remove the connector and add it again.
 
-**Clients that can send a fixed header** (for example Claude Code with `--header`) can skip OAuth and send `Authorization: Bearer <connector key>` instead.
-
 ## Revoking access
 
-- **Claude:** remove the connector in Claude. To cut off every issued token at once, change `CONNECTOR_KEY` and delete the contents of the `OAUTH_KV` namespace in Cloudflare.
+- **Claude:** remove the connector in Claude. To cut off every issued token at once, delete the contents of the `OAUTH_KV` namespace in Cloudflare (and change `CONNECTOR_KEY` if you think it leaked).
 - **Spotify:** remove the app from your Spotify account's app access settings. The Worker will then ask you to sign in again.
 - **Everything:** delete the Worker in Cloudflare.
+
+## Optional: Cloudflare Access
+
+For a second layer, put [Cloudflare Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) in front of the Worker, split by path:
+
+- `/`, `/login`, `/callback`, `/authorize` (pages you open yourself): require your email. Approving a Claude connection or re-linking Spotify then needs your key *and* your inbox.
+- `/mcp`, `/token`, `/register`, `/.well-known/*` (called by Claude's servers): a Bypass policy for [Anthropic's published IP ranges](https://platform.claude.com/docs/en/api/ip-addresses). Everyone else is denied. Update the ranges if Anthropic changes them.
 
 ## Things to know
 

@@ -5,8 +5,8 @@
 //   GET  /callback    Spotify returns here; the refresh token is saved to KV
 //   GET  /authorize   consent page Claude opens when it connects (asks for the connector key)
 //   POST /authorize   approves or denies Claude's request
-//   POST /mcp         the MCP endpoint (needs an OAuth token from the flow above,
-//                     or the connector key as a Bearer token for clients that can send headers)
+//   POST /mcp         the MCP endpoint (needs an OAuth token from the flow above; the
+//                     connector key itself is never accepted here)
 //
 // OAuth discovery, client registration and the token endpoint are served by
 // @cloudflare/workers-oauth-provider, which stores only hashes of tokens in OAUTH_KV.
@@ -296,9 +296,6 @@ function providerFor(origin: string): OAuthProvider<Env> {
       // Claude stays connected while it keeps using the connector; 30 idle days ends the grant.
       refreshTokenTTL: 30 * 24 * 3600,
       refreshTokenIdleTTL: 30 * 24 * 3600,
-      // Clients that can send a fixed header may use the connector key itself as a Bearer token.
-      resolveExternalToken: async ({ token, env }) =>
-        (await keyMatches(env, token)) ? { props: { owner: true }, audience: `${origin}/mcp` } : null,
     });
     providers.set(origin, provider);
   }

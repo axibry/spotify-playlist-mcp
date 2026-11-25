@@ -52,7 +52,7 @@ async function waitForWorker() {
   throw new Error("wrangler dev did not start");
 }
 
-async function connect(token = KEY) {
+async function connect(token) {
   const client = new Client({ name: "test-client", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
@@ -187,13 +187,6 @@ try {
     assert.equal(as.registration_endpoint, `${BASE}/register`);
   });
 
-  await test("MCP endpoint refuses GET and JSON-RPC batches", async () => {
-    const g = await fetch(`${BASE}/mcp`, { headers: { Authorization: `Bearer ${KEY}`, Accept: "text/event-stream" } });
-    assert.equal(g.status, 405);
-    const b = await rawMcp([{ jsonrpc: "2.0", id: 1, method: "ping" }], { Authorization: `Bearer ${KEY}` });
-    assert.equal(b.status, 400);
-  });
-
   // ------------------------------------------------------------ Claude's OAuth connection
 
   await test("client registration only accepts Claude's callback or loopback", async () => {
@@ -264,6 +257,18 @@ try {
     const { tools } = await client.listTools();
     assert.equal(tools.length, 6);
     await client.close();
+  });
+
+  await test("the connector key itself is never accepted as a token", async () => {
+    const r = await rawMcp({ jsonrpc: "2.0", id: 1, method: "ping" }, { Authorization: `Bearer ${KEY}` });
+    assert.equal(r.status, 401);
+  });
+
+  await test("MCP endpoint refuses GET and JSON-RPC batches", async () => {
+    const g = await fetch(`${BASE}/mcp`, { headers: { Authorization: `Bearer ${oauthToken}`, Accept: "text/event-stream" } });
+    assert.equal(g.status, 405);
+    const b = await rawMcp([{ jsonrpc: "2.0", id: 1, method: "ping" }], { Authorization: `Bearer ${oauthToken}` });
+    assert.equal(b.status, 400);
   });
 
   // ------------------------------------------------------------ Spotify sign-in
@@ -493,13 +498,6 @@ try {
     await fetch(`${MOCK}/__rejectfields`);
     const out = data(await client.callTool({ name: "get_playlist", arguments: { playlist: playlistId } }));
     assert.deepEqual(out.tracks.map((t) => t.id), [id(0), id(3), id(4), id(6), id(5)]);
-  });
-
-  await test("the connector key also works as a Bearer token", async () => {
-    const keyClient = await connect(KEY);
-    const out = data(await keyClient.callTool({ name: "list_created_playlists", arguments: {} }));
-    assert.equal(out.playlists.length, 3);
-    await keyClient.close();
   });
 
   await test("revoked Spotify sign-in produces a clear message", async () => {
