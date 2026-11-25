@@ -178,7 +178,10 @@ async function handleCallback(request: Request, env: Env, url: URL): Promise<Res
 // ---------------------------------------------------------------- Claude's connection consent
 
 function authorizationFailure(err: unknown): Response {
-  if (err instanceof AuthorizationError && err.redirectTo) return Response.redirect(err.redirectTo, 302);
+  // Even error redirects only go to the allowed destinations.
+  if (err instanceof AuthorizationError && err.redirectTo && redirectAllowed(err.redirectTo)) {
+    return Response.redirect(err.redirectTo, 302);
+  }
   if (err instanceof AuthorizationError) return messagePage("Can't connect", err.description, 400);
   if (err instanceof CimdFetchError) return messagePage("Can't connect", "The connecting app couldn't be verified.", 400);
   throw err;
