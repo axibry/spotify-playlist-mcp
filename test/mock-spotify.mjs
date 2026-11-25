@@ -58,7 +58,7 @@ export function startMock(port) {
     rateLimitNext: 0,
     requests: [],
   };
-  // A track ID that Spotify relinks to another version when a market is given.
+  // A track ID that Spotify relinks to another version for the account's country.
   state.relinks = { [makeId(500)]: CATALOG[1].id };
   // A playlist owned by the user that the connector did NOT create.
   state.playlists.set(makeId(999), { name: "Someone else's", items: [CATALOG[0].id] });
@@ -150,6 +150,8 @@ export function startMock(port) {
         state.rateLimitNext--;
         return send(429, { error: { message: "rate limited" } }, { "Retry-After": "1" });
       }
+      // Mirrors what real Spotify did without the user-read-private scope.
+      if (url.searchParams.has("market")) return send(403, { error: { message: "Insufficient client scope" } });
       const limit = Number(url.searchParams.get("limit") ?? "5");
       if (limit > 10) return send(400, { error: { message: "Invalid limit" } });
       if (url.searchParams.get("type") !== "track") return send(400, { error: { message: "bad type" } });
@@ -176,7 +178,8 @@ export function startMock(port) {
 
     let m = /^\/tracks\/([0-9A-Za-z]{22})$/.exec(path);
     if (m) {
-      const wanted = url.searchParams.get("market") ? (state.relinks[m[1]] ?? m[1]) : m[1];
+      if (url.searchParams.has("market")) return send(403, { error: { message: "Insufficient client scope" } });
+      const wanted = state.relinks[m[1]] ?? m[1];
       const t = CATALOG.find((x) => x.id === wanted);
       return t ? send(200, t) : send(404, { error: { message: "Non existing id" } });
     }

@@ -319,15 +319,16 @@ export class Spotify {
   }
 
   async searchTracks(q: string, limit: number): Promise<TrackSummary[]> {
+    // No market parameter: with a user token, Spotify applies the account's country itself,
+    // and the old market=from_token form now needs an extra scope.
     const data = (await this.request("GET", "/search", {
-      // market=from_token keeps results to tracks playable in the signed-in account's country.
-      query: { q, type: "track", limit: String(limit), market: "from_token" },
+      query: { q, type: "track", limit: String(limit) },
     })) as { tracks?: { items?: unknown[] } };
     return (data.tracks?.items ?? []).filter(Boolean).map(summarizeTrack);
   }
 
   async getTrack(id: string): Promise<TrackSummary & { requested_id?: string; note?: string }> {
-    const t = summarizeTrack(await this.request("GET", `/tracks/${id}`, { query: { market: "from_token" } }));
+    const t = summarizeTrack(await this.request("GET", `/tracks/${id}`));
     if (t.id !== id) {
       return {
         ...t,

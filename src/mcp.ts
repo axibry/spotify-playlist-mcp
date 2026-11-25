@@ -117,7 +117,7 @@ export function buildServer(env: Env): McpServer {
     {
       title: "Search tracks",
       description:
-        "Look up to 10 tracks on Spotify per call. Each request returns candidate tracks with ID, title, artists, album, release date, duration and a link, so you can pick the exact version. Only tracks playable in the signed-in account's country are returned. Searches with field filters first and falls back to a plain-text search if that finds nothing.",
+        "Look up to 10 tracks on Spotify per call. Each request returns candidate tracks with ID, title, artists, album, release date, duration and a link, so you can pick the exact version. Results follow the signed-in account's country. Searches with field filters first and falls back to a plain-text search if that finds nothing.",
       inputSchema: {
         requests: z
           .array(
