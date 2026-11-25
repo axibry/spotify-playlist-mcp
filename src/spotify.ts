@@ -1,12 +1,17 @@
 // Spotify Web API client: token handling, track search, and playlist writes.
 // Only the endpoints this connector needs are wrapped here.
 
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+
 export interface Env {
   KV: KVNamespace;
+  OAUTH_KV: KVNamespace;
+  OAUTH_PROVIDER: OAuthHelpers;
   SPOTIFY_CLIENT_ID?: string;
   SPOTIFY_CLIENT_SECRET?: string;
   CONNECTOR_KEY?: string;
-  // Local testing only (point at a mock server in .dev.vars). Leave unset in production.
+  // Local testing only: point these at a mock server. Ignored unless they are loopback URLs,
+  // so a stray production setting can't send credentials elsewhere.
   SPOTIFY_ACCOUNTS_BASE?: string;
   SPOTIFY_API_BASE?: string;
 }
@@ -18,7 +23,6 @@ export const KV_KEYS = {
   refreshToken: "spotify:refresh_token",
   accessToken: "spotify:access_token",
   user: "spotify:user",
-  statePrefix: "oauth_state:",
   playlistPrefix: "playlist:",
 } as const;
 
@@ -54,45 +58,30 @@ export interface PlaylistTrack {
   type: string;
 }
 
-const TRACK_ID = /^[0-9A-Za-z]{22}$/;
+const BASE62_ID = /^[0-9A-Za-z]{22}$/;
 
-/** Accepts a bare track ID, a spotify:track: URI, or an open.spotify.com track link. */
-export function parseTrackId(input: string): string {
+function parseSpotifyId(input: string, kind: "track" | "playlist"): string {
   const s = input.trim();
-  if (TRACK_ID.test(s)) return s;
-  const uri = /^spotify:track:([0-9A-Za-z]{22})$/.exec(s);
+  if (BASE62_ID.test(s)) return s;
+  const uri = new RegExp(`^spotify:${kind}:([0-9A-Za-z]{22})$`).exec(s);
   if (uri) return uri[1];
   try {
     const url = new URL(s);
     if (url.hostname === "open.spotify.com") {
       const parts = url.pathname.split("/").filter(Boolean);
-      const i = parts.indexOf("track");
-      if (i !== -1 && TRACK_ID.test(parts[i + 1] ?? "")) return parts[i + 1];
+      const i = parts.indexOf(kind);
+      if (i !== -1 && BASE62_ID.test(parts[i + 1] ?? "")) return parts[i + 1];
     }
   } catch {
     // not a URL
   }
-  throw new SpotifyError(`Not a Spotify track ID, URI or link: "${input}"`);
+  throw new SpotifyError(`Not a Spotify ${kind} ID, URI or link: "${input}"`);
 }
 
-/** Same as parseTrackId, but for playlists. */
-export function parsePlaylistId(input: string): string {
-  const s = input.trim();
-  if (TRACK_ID.test(s)) return s;
-  const uri = /^spotify:playlist:([0-9A-Za-z]{22})$/.exec(s);
-  if (uri) return uri[1];
-  try {
-    const url = new URL(s);
-    if (url.hostname === "open.spotify.com") {
-      const parts = url.pathname.split("/").filter(Boolean);
-      const i = parts.indexOf("playlist");
-      if (i !== -1 && TRACK_ID.test(parts[i + 1] ?? "")) return parts[i + 1];
-    }
-  } catch {
-    // not a URL
-  }
-  throw new SpotifyError(`Not a Spotify playlist ID, URI or link: "${input}"`);
-}
+/** Accepts a bare ID, a spotify:track: URI, or an open.spotify.com track link. */
+export const parseTrackId = (input: string) => parseSpotifyId(input, "track");
+/** Accepts a bare ID, a spotify:playlist: URI, or an open.spotify.com playlist link. */
+export const parsePlaylistId = (input: string) => parseSpotifyId(input, "playlist");
 
 function formatDuration(ms: number | undefined): string {
   if (typeof ms !== "number") return "?";
@@ -144,15 +133,44 @@ export function buildSearchQueries(q: TrackQuery): { strict: string; loose?: str
   return { strict: parts.join(" "), loose: loose || undefined };
 }
 
-export class Spotify {
-  constructor(private readonly env: Env) {}
-
-  private get accountsBase(): string {
-    return this.env.SPOTIFY_ACCOUNTS_BASE ?? "https://accounts.spotify.com";
+function loopbackOnly(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const host = new URL(value).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]" ? value.replace(/\/$/, "") : undefined;
+  } catch {
+    return undefined;
   }
+}
 
-  private get apiBase(): string {
-    return this.env.SPOTIFY_API_BASE ?? "https://api.spotify.com/v1";
+interface PlaylistItemsPage {
+  next?: string | null;
+  total?: number;
+  items?: Array<{ item?: RawItem | null; track?: RawItem | null }>;
+}
+
+interface RawItem {
+  id?: string | null;
+  name?: string;
+  type?: string;
+  artists?: Array<{ name: string }>;
+}
+
+const ITEM_FIELDS = "next,total,items(item(id,name,type,artists(name)),track(id,name,type,artists(name)))";
+
+export class Spotify {
+  private readonly accountsBase: string;
+  private readonly apiBase: string;
+  private cachedToken?: string;
+  private refreshing?: Promise<string>;
+  // Trimming playlist reads with `fields` keeps them small. Spotify renamed the per-entry
+  // field from "track" to "item" in 2026, so ask for both; if Spotify rejects the filter,
+  // fall back to full responses for the rest of this request.
+  private useFieldsFilter = true;
+
+  constructor(private readonly env: Env) {
+    this.accountsBase = loopbackOnly(env.SPOTIFY_ACCOUNTS_BASE) ?? "https://accounts.spotify.com";
+    this.apiBase = loopbackOnly(env.SPOTIFY_API_BASE) ?? "https://api.spotify.com/v1";
   }
 
   authorizeUrl(redirectUri: string, state: string): string {
@@ -183,7 +201,7 @@ export class Spotify {
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) {
-      const detail = (data.error_description ?? data.error ?? res.statusText) as string;
+      const detail = String(data.error_description ?? data.error ?? res.statusText);
       if (data.error === "invalid_grant") {
         throw new NotConnectedError(
           `Spotify rejected the saved sign-in (${detail}). Sign in again on the connector's home page.`,
@@ -196,9 +214,15 @@ export class Spotify {
   }
 
   private async cacheAccessToken(token: string, expiresIn: number): Promise<void> {
-    // Expire the cached copy two minutes early; KV's minimum TTL is 60 seconds.
+    this.cachedToken = token;
+    // Expire the shared copy two minutes early (KV's minimum TTL is 60 s). Caching is an
+    // optimisation, so a failed write (e.g. KV's one-write-per-second-per-key limit) is ignored.
     const ttl = Math.max(60, Math.floor(expiresIn) - 120);
-    await this.env.KV.put(KV_KEYS.accessToken, token, { expirationTtl: ttl });
+    try {
+      await this.env.KV.put(KV_KEYS.accessToken, token, { expirationTtl: ttl });
+    } catch (err) {
+      console.warn("Could not cache access token", err);
+    }
   }
 
   /** Exchanges the one-time sign-in code for tokens and stores them. */
@@ -220,18 +244,28 @@ export class Spotify {
 
   private async accessToken(forceRefresh = false): Promise<string> {
     if (!forceRefresh) {
-      const cached = await this.env.KV.get(KV_KEYS.accessToken);
-      if (cached) return cached;
+      if (this.cachedToken) return this.cachedToken;
+      const shared = await this.env.KV.get(KV_KEYS.accessToken);
+      if (shared) return (this.cachedToken = shared);
     }
-    const refresh = await this.env.KV.get(KV_KEYS.refreshToken);
-    if (!refresh) {
-      throw new NotConnectedError("Spotify isn't connected yet. Sign in on the connector's home page first.");
+    // One refresh at a time per request, however many calls are waiting on it.
+    this.refreshing ??= this.refresh().finally(() => {
+      this.refreshing = undefined;
+    });
+    return this.refreshing;
+  }
+
+  private async refresh(): Promise<string> {
+    this.cachedToken = undefined;
+    const saved = await this.env.KV.get(KV_KEYS.refreshToken);
+    if (!saved) {
+      throw new NotConnectedError(
+        "Spotify isn't connected yet. Sign in on the connector's home page first (if you just did, wait a minute and try again).",
+      );
     }
-    const tokens = await this.tokenRequest(
-      new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh }),
-    );
+    const tokens = await this.tokenRequest(new URLSearchParams({ grant_type: "refresh_token", refresh_token: saved }));
     // Spotify may rotate the refresh token; keep the newest one.
-    if (tokens.refresh_token && tokens.refresh_token !== refresh) {
+    if (tokens.refresh_token && tokens.refresh_token !== saved) {
       await this.env.KV.put(KV_KEYS.refreshToken, tokens.refresh_token);
     }
     await this.cacheAccessToken(tokens.access_token, tokens.expires_in);
@@ -247,6 +281,7 @@ export class Spotify {
     for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, v);
 
     let token = await this.accessToken();
+    let refreshed = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await fetch(url, {
         method,
@@ -257,7 +292,8 @@ export class Spotify {
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       });
 
-      if (res.status === 401 && attempt === 0) {
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
         token = await this.accessToken(true);
         continue;
       }
@@ -268,6 +304,9 @@ export class Spotify {
           continue;
         }
       }
+      // Retry server errors once, but only for reads: repeating a POST could add tracks twice.
+      if (res.status >= 500 && method === "GET" && attempt === 0) continue;
+
       if (res.status === 204) return {};
       const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
       if (!res.ok) {
@@ -279,16 +318,24 @@ export class Spotify {
     throw new SpotifyError(`Spotify ${method} ${path} failed after retries.`);
   }
 
-  async searchTracks(q: string, limit: number, offset = 0): Promise<TrackSummary[]> {
+  async searchTracks(q: string, limit: number): Promise<TrackSummary[]> {
     const data = (await this.request("GET", "/search", {
       // market=from_token keeps results to tracks playable in the signed-in account's country.
-      query: { q, type: "track", limit: String(limit), offset: String(offset), market: "from_token" },
+      query: { q, type: "track", limit: String(limit), market: "from_token" },
     })) as { tracks?: { items?: unknown[] } };
     return (data.tracks?.items ?? []).filter(Boolean).map(summarizeTrack);
   }
 
-  async getTrack(id: string): Promise<TrackSummary> {
-    return summarizeTrack(await this.request("GET", `/tracks/${id}`, { query: { market: "from_token" } }));
+  async getTrack(id: string): Promise<TrackSummary & { requested_id?: string; note?: string }> {
+    const t = summarizeTrack(await this.request("GET", `/tracks/${id}`, { query: { market: "from_token" } }));
+    if (t.id !== id) {
+      return {
+        ...t,
+        requested_id: id,
+        note: "Spotify substituted the playable version of this track in your country; use the returned id.",
+      };
+    }
+    return t;
   }
 
   async createPlaylist(name: string, description: string | undefined): Promise<{ id: string; link: string }> {
@@ -301,13 +348,27 @@ export class Spotify {
     return { id: p.id, link: p.external_urls?.spotify ?? `https://open.spotify.com/playlist/${p.id}` };
   }
 
-  /** Adds tracks in order, 100 per request (Spotify's limit). */
-  async addTracks(playlistId: string, trackIds: string[], position?: number): Promise<void> {
-    for (let i = 0; i < trackIds.length; i += 100) {
-      const chunk = trackIds.slice(i, i + 100);
-      const body: Record<string, unknown> = { uris: chunk.map((id) => `spotify:track:${id}`) };
-      if (position !== undefined) body.position = position + i;
-      await this.request("POST", `/playlists/${playlistId}/items`, { body });
+  /**
+   * Adds tracks in order, 100 per request (Spotify's limit). Returns how many were added
+   * before any failure, so callers can report a partial result instead of hiding it.
+   */
+  async addTracks(
+    playlistId: string,
+    trackIds: string[],
+    position?: number,
+  ): Promise<{ added: number; error?: string }> {
+    let added = 0;
+    try {
+      for (let i = 0; i < trackIds.length; i += 100) {
+        const chunk = trackIds.slice(i, i + 100);
+        const body: Record<string, unknown> = { uris: chunk.map((id) => `spotify:track:${id}`) };
+        if (position !== undefined) body.position = position + i;
+        await this.request("POST", `/playlists/${playlistId}/items`, { body });
+        added += chunk.length;
+      }
+      return { added };
+    } catch (err) {
+      return { added, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -318,56 +379,51 @@ export class Spotify {
     return { name: p.name, link: p.external_urls?.spotify ?? `https://open.spotify.com/playlist/${playlistId}` };
   }
 
-  /** Reads every item of a playlist back, in order. */
-  async getPlaylistTracks(playlistId: string): Promise<PlaylistTrack[]> {
+  private async itemsPage(playlistId: string, offset: number, limit: number): Promise<PlaylistItemsPage> {
+    const query: Record<string, string> = { limit: String(limit), offset: String(offset) };
+    if (this.useFieldsFilter) {
+      try {
+        return (await this.request("GET", `/playlists/${playlistId}/items`, {
+          query: { ...query, fields: ITEM_FIELDS },
+        })) as PlaylistItemsPage;
+      } catch (err) {
+        if (!(err instanceof SpotifyError && err.status === 400)) throw err;
+        this.useFieldsFilter = false;
+      }
+    }
+    return (await this.request("GET", `/playlists/${playlistId}/items`, { query })) as PlaylistItemsPage;
+  }
+
+  /** The number of items in a playlist, in one small request. */
+  async playlistLength(playlistId: string): Promise<number> {
+    const page = await this.itemsPage(playlistId, 0, 1);
+    if (typeof page.total === "number") return page.total;
+    throw new SpotifyError("Spotify didn't report the playlist's length.");
+  }
+
+  /** Reads `count` items starting at `start` (or to the end), in order. */
+  async getPlaylistTracks(playlistId: string, start = 0, count = Infinity): Promise<{ tracks: PlaylistTrack[]; total?: number }> {
     const out: PlaylistTrack[] = [];
-    for (let offset = 0; offset < 10000; offset += 50) {
-      const page = await this.playlistItemsPage(playlistId, offset);
+    let total: number | undefined;
+    let offset = start;
+    while (out.length < count) {
+      const limit = Math.min(50, count - out.length);
+      const page = await this.itemsPage(playlistId, offset, limit);
+      if (typeof page.total === "number") total = page.total;
       const items = page.items ?? [];
       for (const entry of items) {
         const t = entry.item ?? entry.track ?? null;
         out.push({
-          position: out.length,
+          position: start + out.length,
           id: t?.id ?? null,
           name: t?.name ?? "(unavailable)",
           artists: (t?.artists ?? []).map((a) => a.name),
           type: t?.type ?? "unknown",
         });
       }
+      offset += items.length;
       if (!page.next || items.length === 0) break;
     }
-    return out;
+    return { tracks: out, total };
   }
-
-  // Trimming the response with `fields` keeps each read small. Spotify renamed the per-entry
-  // field from "track" to "item" in 2026, so ask for both; if Spotify rejects the filter,
-  // fall back to the full response.
-  private static fieldsFilterRejected = false;
-
-  private async playlistItemsPage(playlistId: string, offset: number): Promise<PlaylistItemsPage> {
-    const query: Record<string, string> = { limit: "50", offset: String(offset) };
-    if (!Spotify.fieldsFilterRejected) {
-      try {
-        return (await this.request("GET", `/playlists/${playlistId}/items`, {
-          query: { ...query, fields: "next,items(item(id,name,type,artists(name)),track(id,name,type,artists(name)))" },
-        })) as PlaylistItemsPage;
-      } catch (err) {
-        if (!(err instanceof SpotifyError && err.status === 400)) throw err;
-        Spotify.fieldsFilterRejected = true;
-      }
-    }
-    return (await this.request("GET", `/playlists/${playlistId}/items`, { query })) as PlaylistItemsPage;
-  }
-}
-
-interface PlaylistItemsPage {
-  next?: string | null;
-  items?: Array<{ item?: RawItem | null; track?: RawItem | null }>;
-}
-
-interface RawItem {
-  id?: string | null;
-  name?: string;
-  type?: string;
-  artists?: Array<{ name: string }>;
 }

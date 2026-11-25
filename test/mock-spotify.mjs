@@ -44,6 +44,9 @@ export const CATALOG = [
   track(7, "Strobe", "deadmau5", "For Lack of a Better Name", "album", "2009-10-06", 637000),
 ];
 
+export const UNKNOWN_ID = makeId(777);
+export const RELINKED_ID = makeId(500);
+
 export function startMock(port) {
   const state = {
     codes: new Set(),
@@ -55,6 +58,8 @@ export function startMock(port) {
     rateLimitNext: 0,
     requests: [],
   };
+  // A track ID that Spotify relinks to another version when a market is given.
+  state.relinks = { [makeId(500)]: CATALOG[1].id };
   // A playlist owned by the user that the connector did NOT create.
   state.playlists.set(makeId(999), { name: "Someone else's", items: [CATALOG[0].id] });
 
@@ -171,7 +176,8 @@ export function startMock(port) {
 
     let m = /^\/tracks\/([0-9A-Za-z]{22})$/.exec(path);
     if (m) {
-      const t = CATALOG.find((x) => x.id === m[1]);
+      const wanted = url.searchParams.get("market") ? (state.relinks[m[1]] ?? m[1]) : m[1];
+      const t = CATALOG.find((x) => x.id === wanted);
       return t ? send(200, t) : send(404, { error: { message: "Non existing id" } });
     }
 
